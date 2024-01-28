@@ -89,12 +89,7 @@ async fn main() -> eyre::Result<()> {
                 .header("Authorization", format!("Bearer {}", token))
                 .send()
                 .await?
-                .error_for_status();
-
-            let resp = match resp {
-                Ok(resp) => resp,
-                Err(_) => break,
-            };
+                .error_for_status()?;
 
             let json = resp.json::<Vec<Commit>>().await?;
             if json.is_empty() {
@@ -130,8 +125,6 @@ async fn main() -> eyre::Result<()> {
     for (k, v) in map {
         println!("{k}: {v}");
     }
-
-    // dbg!(filter_author);
 
     Ok(())
 }
