@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
     } = args;
 
     let days = days as i64;
-    let days = Duration::days(days);
+    let days_duration = Duration::days(days);
 
     let mut map = HashMap::new();
 
@@ -95,12 +95,17 @@ async fn main() -> Result<()> {
 
     for i in repos {
         let dt = DateTime::parse_from_rfc3339(&i.pushed_at)?.to_utc();
-        if Utc::now() - dt <= days {
+        if Utc::now() - dt <= days_duration {
             filter_repos.push(i);
         }
     }
 
-    info!("Modified {} repos this month", filter_repos.len());
+    info!(
+        "A total of {} repos have been modified in the last {} days.",
+        filter_repos.len(),
+        days
+    );
+
     debug!("Repos: {:?}", filter_repos);
 
     let mut filter_author = vec![];
@@ -121,7 +126,9 @@ async fn main() -> Result<()> {
                     let author_date = &commit.author.date;
                     let committer_dt = DateTime::parse_from_rfc3339(committer_date)?.to_utc();
                     let author_dt = DateTime::parse_from_rfc3339(author_date)?.to_utc();
-                    if Utc::now() - committer_dt > days && Utc::now() - author_dt > days {
+                    if Utc::now() - committer_dt > days_duration
+                        && Utc::now() - author_dt > days_duration
+                    {
                         break 'a;
                     }
                     filter_author.push(i);
