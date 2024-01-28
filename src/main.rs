@@ -5,7 +5,7 @@ use clap::Parser;
 use eyre::{bail, Result};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use tracing::{debug, info, level_filters::LevelFilter};
+use tracing::{debug, error, info, level_filters::LevelFilter};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 #[derive(Deserialize, Debug)]
@@ -34,7 +34,7 @@ struct RepoAuthor {
 
 #[derive(Deserialize, Debug)]
 struct Author {
-    login: String,
+    login: Option<String>,
     html_url: Option<String>,
 }
 
@@ -115,7 +115,17 @@ async fn main() -> Result<()> {
         'a: loop {
             info!("Getting repo: {} page: {}", i.url, page);
 
-            let json = get_commits(&client, &token, &i.url, page).await?;
+            let json = match get_commits(&client, &token, &i.url, page).await {
+                Ok(json) => json,
+                Err(e) => match e.status() {
+                    Some(StatusCode::CONFLICT) => {
+                        error!("Git Repository is empty: {}", e);
+                        break;
+                    }
+                    _ => bail!("Failed to get commits {}: {e}", i.url),
+                },
+            };
+
             if json.is_empty() {
                 break;
             }
@@ -142,13 +152,17 @@ async fn main() -> Result<()> {
     for i in filter_author {
         if let Some(author) = i.author {
             if let Some(url) = &author.html_url {
-                map.insert(author.login.to_string(), url.to_string());
+                if let Some(login) = author.login {
+                    map.insert(login.to_string(), url.to_string());
+                }
             }
         }
 
         if let Some(committer) = i.committer {
             if let Some(url) = &committer.html_url {
-                map.insert(committer.login.to_string(), url.to_string());
+                if let Some(login) = committer.login {
+                    map.insert(login.to_string(), url.to_string());
+                }
             }
         }
     }
@@ -186,15 +200,18 @@ async fn get_commits(
     token: &str,
     repo_api_url: &str,
     page: u64,
-) -> Result<Vec<Commit>> {
-    Ok(client
-        .get(format!("{}/commits?page={}", repo_api_url, page))
+) -> std::result::Result<Vec<Commit>, reqwest::Error> {
+    client
+        .get(format!(
+            "{}/commits?page={}&per_page=100",
+            repo_api_url, page
+        ))
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await?
         .error_for_status()?
         .json::<Vec<Commit>>()
-        .await?)
+        .await
 }
 
 async fn is_org_user(client: &Client, user: &str, token: &str) -> Result<bool> {
