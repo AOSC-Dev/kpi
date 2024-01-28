@@ -1,9 +1,11 @@
-use std::{collections::HashMap, env};
+use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
-use reqwest::Client;
+use clap::Parser;
+use eyre::{bail, Result};
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use tracing::{debug, level_filters::LevelFilter};
+use tracing::{info, level_filters::LevelFilter};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 #[derive(Deserialize, Debug)]
@@ -16,7 +18,7 @@ struct Repo {
 struct Commit {
     commit: Option<RepoCommit>,
     author: Option<Author>,
-    _committer: Option<Author>,
+    committer: Option<Author>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -36,8 +38,29 @@ struct Author {
     html_url: Option<String>,
 }
 
+#[derive(Parser, Debug)]
+#[clap(about, version, author)]
+struct Args {
+    // result output to markdown format
+    #[arg(long)]
+    to_markdown: bool,
+    // Github token
+    #[arg(long, env = "GITHUB_TOKEN")]
+    token: String,
+    // Days for query kpi
+    #[arg(long)]
+    days: u64,
+    // Filter is organization user
+    #[arg(long)]
+    filter_org_user: bool,
+    // Organization name
+    #[arg(long)]
+    org: String,
+}
+
 #[tokio::main]
-async fn main() -> eyre::Result<()> {
+async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     let env_log = EnvFilter::try_from_default_env();
 
     if let Ok(filter) = env_log {
@@ -50,67 +73,61 @@ async fn main() -> eyre::Result<()> {
             .with(LevelFilter::INFO)
             .init();
     }
+    let args = Args::parse();
+    let Args {
+        to_markdown,
+        token,
+        days,
+        filter_org_user,
+        org,
+    } = args;
+
+    let days = days as i64;
+    let days = Duration::days(days);
 
     let mut map = HashMap::new();
-    let token = env::var("GITHUB_TOKEN")?;
+
     let client = Client::builder().user_agent("aosc-kpi").build()?;
-    let repos = client
-        .get("https://api.github.com/orgs/aosc-dev/repos?per_page=100&sort=pushed")
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Vec<Repo>>()
-        .await?;
+
+    let repos = get_repos(&client, &token, &org).await?;
 
     let mut filter_repos = vec![];
 
     for i in repos {
         let dt = DateTime::parse_from_rfc3339(&i.pushed_at)?.to_utc();
-        if Utc::now() - dt <= Duration::days(31) {
+        if Utc::now() - dt <= days {
             filter_repos.push(i);
         }
     }
 
     println!("Modified {} repos this month", filter_repos.len());
-    println!("Repos:\n{:#?}", filter_repos);
 
     let mut filter_author = vec![];
 
     for i in filter_repos {
-        let mut j = 1;
-        if i.url.contains("AOSC-Dev/linux") {
-            continue;
-        }
+        let mut page = 1;
         'a: loop {
-            debug!("Getting repo: {} page: {}", i.url, j);
-            let resp = client
-                .get(format!("{}/commits?page={}", i.url, j))
-                .header("Authorization", format!("Bearer {}", token))
-                .send()
-                .await?
-                .error_for_status()?;
+            info!("Getting repo: {} page: {}", i.url, page);
 
-            let json = resp.json::<Vec<Commit>>().await?;
+            let json = get_commits(&client, &token, &i.url, page).await?;
             if json.is_empty() {
                 break;
             }
+
             for i in json {
                 if let Some(commit) = &i.commit {
                     let committer_date = &commit.committer.date;
                     let author_date = &commit.author.date;
-                    let committer_dt = DateTime::parse_from_rfc3339(&committer_date)?.to_utc();
-                    let author_dt = DateTime::parse_from_rfc3339(&author_date)?.to_utc();
-                    if Utc::now() - committer_dt > Duration::days(31)
-                        && Utc::now() - author_dt > Duration::days(31)
-                    {
+                    let committer_dt = DateTime::parse_from_rfc3339(committer_date)?.to_utc();
+                    let author_dt = DateTime::parse_from_rfc3339(author_date)?.to_utc();
+                    if Utc::now() - committer_dt > days && Utc::now() - author_dt > days {
                         break 'a;
                     }
                     filter_author.push(i);
                 }
             }
 
-            j += 1;
+            page += 1;
         }
     }
 
@@ -120,11 +137,74 @@ async fn main() -> eyre::Result<()> {
                 map.insert(author.login.to_string(), url.to_string());
             }
         }
+
+        if let Some(committer) = i.committer {
+            if let Some(url) = &committer.html_url {
+                map.insert(committer.login.to_string(), url.to_string());
+            }
+        }
     }
 
     for (k, v) in map {
-        println!("{k}: {v}");
+        if filter_org_user && !is_org_user(&client, &k, &token).await? {
+            continue;
+        }
+
+        if to_markdown {
+            println!("- [{}]({})", k, v);
+        } else {
+            println!("{k}: {v}");
+        }
     }
 
     Ok(())
+}
+
+async fn get_repos(client: &Client, token: &str, org: &str) -> Result<Vec<Repo>> {
+    Ok(client
+        .get(format!(
+            "https://api.github.com/orgs/{org}/repos?per_page=100&sort=pushed"
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<Repo>>()
+        .await?)
+}
+
+async fn get_commits(
+    client: &Client,
+    token: &str,
+    repo_api_url: &str,
+    page: u64,
+) -> Result<Vec<Commit>> {
+    Ok(client
+        .get(format!("{}/commits?page={}", repo_api_url, page))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Vec<Commit>>()
+        .await?)
+}
+
+async fn is_org_user(client: &Client, user: &str, token: &str) -> Result<bool> {
+    let resp = client
+        .get(format!(
+            "https://api.github.com/orgs/aosc-dev/memberships/{}",
+            user
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .and_then(|x| x.error_for_status());
+
+    match resp {
+        Ok(_) => Ok(true),
+        Err(e) => match e.status() {
+            Some(StatusCode::NOT_FOUND) => Ok(false),
+            _ => bail!("Network is not reachable: {e}"),
+        },
+    }
 }
