@@ -5,7 +5,7 @@ use clap::Parser;
 use eyre::{bail, Result};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use tracing::{info, level_filters::LevelFilter};
+use tracing::{debug, info, level_filters::LevelFilter};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 #[derive(Deserialize, Debug)]
@@ -100,7 +100,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("Modified {} repos this month", filter_repos.len());
+    info!("Modified {} repos this month", filter_repos.len());
+    debug!("Repos: {:?}", filter_repos);
 
     let mut filter_author = vec![];
 
