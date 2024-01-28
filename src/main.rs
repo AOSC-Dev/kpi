@@ -41,19 +41,19 @@ struct Author {
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
 struct Args {
-    // result output to markdown format
+    /// result output to markdown format
     #[arg(long)]
     to_markdown: bool,
-    // Github token
+    /// Github token
     #[arg(long, env = "GITHUB_TOKEN")]
     token: String,
-    // Days for query kpi
+    /// Days for query kpi
     #[arg(long)]
     days: u64,
-    // Filter is organization user
+    /// Filter is organization user
     #[arg(long)]
     filter_org_user: bool,
-    // Organization name
+    /// Organization name
     #[arg(long)]
     org: String,
 }
