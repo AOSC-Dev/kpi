@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration, Utc};
 use clap::Parser;
 use eyre::{bail, Result};
+use futures::StreamExt;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tracing::{debug, error, info, level_filters::LevelFilter};
@@ -56,6 +57,8 @@ struct Args {
     /// Organization name
     #[arg(long)]
     org: String,
+    #[arg(long, default_value = "4")]
+    thread: usize,
 }
 
 #[tokio::main]
@@ -80,6 +83,7 @@ async fn main() -> Result<()> {
         days,
         filter_org_user,
         org,
+        thread,
     } = args;
 
     let days = days as i64;
@@ -108,74 +112,85 @@ async fn main() -> Result<()> {
 
     debug!("Repos: {:?}", filter_repos);
 
-    let mut filter_author = vec![];
+    let mut tasks = vec![];
 
     for i in filter_repos {
-        let mut page = 1;
-        'a: loop {
-            info!("Getting repo: {} page: {}", i.url, page);
-
-            let json = match get_commits(&client, &token, &i.url, page).await {
-                Ok(json) => json,
-                Err(e) => match e.status() {
-                    Some(StatusCode::CONFLICT) => {
-                        error!("Git Repository is empty: {}", e);
-                        break;
-                    }
-                    _ => bail!("Failed to get commits {}: {e}", i.url),
-                },
-            };
-
-            if json.is_empty() {
-                break;
-            }
-
-            for i in json {
-                if let Some(commit) = &i.commit {
-                    let committer_date = &commit.committer.date;
-                    let author_date = &commit.author.date;
-                    let committer_dt = DateTime::parse_from_rfc3339(committer_date)?.to_utc();
-                    let author_dt = DateTime::parse_from_rfc3339(author_date)?.to_utc();
-                    if Utc::now() - committer_dt > days_duration
-                        && Utc::now() - author_dt > days_duration
-                    {
-                        break 'a;
-                    }
-                    filter_author.push(i);
-                }
-            }
-
-            page += 1;
-        }
+        tasks.push(get_commits_info_by_url(
+            &client,
+            i.url,
+            &token,
+            days_duration,
+        ))
     }
 
-    for i in filter_author {
-        if let Some(author) = i.author {
-            if let Some(url) = &author.html_url {
-                if let Some(login) = author.login {
-                    map.insert(login.to_string(), url.to_string());
+    let stream = futures::stream::iter(tasks)
+        .buffer_unordered(thread)
+        .collect::<Vec<_>>()
+        .await;
+
+    for i in stream {
+        match i {
+            Ok(commits) => {
+                for commit in commits {
+                    if let Some(author) = commit.author {
+                        if let Some(url) = &author.html_url {
+                            if let Some(login) = author.login {
+                                map.insert(login.to_string(), url.to_string());
+                            }
+                        }
+                    }
+
+                    if let Some(committer) = commit.committer {
+                        if let Some(url) = &committer.html_url {
+                            if let Some(login) = committer.login {
+                                map.insert(login.to_string(), url.to_string());
+                            }
+                        }
+                    }
                 }
             }
-        }
-
-        if let Some(committer) = i.committer {
-            if let Some(url) = &committer.html_url {
-                if let Some(login) = committer.login {
-                    map.insert(login.to_string(), url.to_string());
-                }
+            Err(e) => {
+                error!("{:?}", e);
             }
         }
     }
 
-    for (k, v) in map {
-        if filter_org_user && !is_org_user(&client, &k, &token).await? {
-            continue;
+    if filter_org_user {
+        let mut tasks = vec![];
+        for i in map.keys() {
+            tasks.push(is_org_user(&client, i, &token));
         }
 
-        if to_markdown {
-            println!("- [{}]({})", k, v);
-        } else {
-            println!("{k}: {v}");
+        let stream = futures::stream::iter(tasks)
+            .buffer_unordered(args.thread)
+            .collect::<Vec<_>>()
+            .await;
+
+        for i in stream {
+            match i {
+                Ok((user, is_org_user)) => {
+                    if !is_org_user {
+                        continue;
+                    }
+
+                    if to_markdown {
+                        println!("- [{}]({})", user, map[user]);
+                    } else {
+                        println!("{user}: {}", map[user]);
+                    }
+                }
+                Err(e) => {
+                    bail!("{e}")
+                }
+            }
+        }
+    } else {
+        for (k, v) in map {
+            if to_markdown {
+                println!("- [{}]({})", k, v);
+            } else {
+                println!("{k}: {v}");
+            }
         }
     }
 
@@ -214,7 +229,11 @@ async fn get_commits(
         .await
 }
 
-async fn is_org_user(client: &Client, user: &str, token: &str) -> Result<bool> {
+async fn is_org_user<'a>(
+    client: &'a Client,
+    user: &'a str,
+    token: &'a str,
+) -> Result<(&'a str, bool)> {
     let resp = client
         .get(format!(
             "https://api.github.com/orgs/aosc-dev/memberships/{}",
@@ -226,10 +245,56 @@ async fn is_org_user(client: &Client, user: &str, token: &str) -> Result<bool> {
         .and_then(|x| x.error_for_status());
 
     match resp {
-        Ok(_) => Ok(true),
+        Ok(_) => Ok((user, true)),
         Err(e) => match e.status() {
-            Some(StatusCode::NOT_FOUND) => Ok(false),
+            Some(StatusCode::NOT_FOUND) => Ok((user, false)),
             _ => bail!("Network is not reachable: {e}"),
         },
+    }
+}
+
+async fn get_commits_info_by_url(
+    client: &Client,
+    url: String,
+    token: &str,
+    days_duration: Duration,
+) -> Result<Vec<Commit>> {
+    let mut page = 1;
+    let mut filter_author = vec![];
+
+    loop {
+        info!("Getting repo: {} page: {}", url, page);
+
+        let json = match get_commits(&client, &token, &url, page).await {
+            Ok(json) => json,
+            Err(e) => match e.status() {
+                Some(StatusCode::CONFLICT) => {
+                    bail!("Git Repository is empty: {}", e)
+                }
+                _ => bail!("Failed to get commits {}: {e}", url),
+            },
+        };
+
+        if json.is_empty() {
+            return Ok(filter_author);
+        }
+
+        for i in json {
+            if let Some(commit) = &i.commit {
+                let committer_date = &commit.committer.date;
+                let author_date = &commit.author.date;
+                let committer_dt = DateTime::parse_from_rfc3339(committer_date)?.to_utc();
+                let author_dt = DateTime::parse_from_rfc3339(author_date)?.to_utc();
+                if Utc::now() - committer_dt > days_duration
+                    && Utc::now() - author_dt > days_duration
+                {
+                    return Ok(filter_author);
+                }
+
+                filter_author.push(i);
+            }
+        }
+
+        page += 1;
     }
 }
