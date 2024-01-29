@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::Parser;
 use eyre::{bail, Result};
 use futures::StreamExt;
+use indicatif::ProgressBar;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tracing::{debug, error, info, level_filters::LevelFilter};
@@ -57,8 +58,11 @@ struct Args {
     /// Organization name
     #[arg(long)]
     org: String,
+    /// Set fetch network thread
     #[arg(long, default_value = "4")]
     thread: usize,
+    /// Do not display fetch progress
+    no_progress: bool,
 }
 
 #[tokio::main]
@@ -84,15 +88,25 @@ async fn main() -> Result<()> {
         filter_org_user,
         org,
         thread,
+        no_progress,
     } = args;
 
     let days = days as i64;
-    let days_duration = Duration::days(days);
+    let days_duration = ChronoDuration::days(days);
 
     let mut map = HashMap::new();
 
     let client = Client::builder().user_agent("aosc-kpi").build()?;
 
+    let pb = if !no_progress {
+        let pb = ProgressBar::new_spinner();
+        pb.enable_steady_tick(Duration::from_millis(100));
+        Some(ProgressBar::new_spinner())
+    } else {
+        None
+    };
+
+    update_pb(pb.as_ref(), "Getting matches repos ...".to_string());
     let repos = get_repos(&client, &token, &org).await?;
 
     let mut filter_repos = vec![];
@@ -104,11 +118,19 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!(
-        "A total of {} repos have been modified in the last {} days.",
-        filter_repos.len(),
-        days
-    );
+    if let Some(ref pb) = pb {
+        pb.println(format!(
+            "A total of {} repos have been modified in the last {} days.",
+            filter_repos.len(),
+            days
+        ));
+    } else {
+        info!(
+            "A total of {} repos have been modified in the last {} days.",
+            filter_repos.len(),
+            days
+        );
+    }
 
     debug!("Repos: {:?}", filter_repos);
 
@@ -120,6 +142,7 @@ async fn main() -> Result<()> {
             i.url,
             &token,
             days_duration,
+            pb.as_ref(),
         ))
     }
 
@@ -158,13 +181,17 @@ async fn main() -> Result<()> {
     if filter_org_user {
         let mut tasks = vec![];
         for i in map.keys() {
-            tasks.push(is_org_user(&client, i, &token));
+            tasks.push(is_org_user(&client, i, &token, pb.as_ref()));
         }
 
         let stream = futures::stream::iter(tasks)
             .buffer_unordered(args.thread)
             .collect::<Vec<_>>()
             .await;
+
+        if let Some(pb) = pb {
+            pb.finish_and_clear();
+        }
 
         for i in stream {
             match i {
@@ -185,6 +212,10 @@ async fn main() -> Result<()> {
             }
         }
     } else {
+        if let Some(pb) = pb {
+            pb.finish_and_clear();
+        }
+
         for (k, v) in map {
             if to_markdown {
                 println!("- [{}]({})", k, v);
@@ -233,7 +264,10 @@ async fn is_org_user<'a>(
     client: &'a Client,
     user: &'a str,
     token: &'a str,
+    pb: Option<&ProgressBar>,
 ) -> Result<(&'a str, bool)> {
+    update_pb(pb, format!("Checking {user} is org user ..."));
+
     let resp = client
         .get(format!(
             "https://api.github.com/orgs/aosc-dev/memberships/{}",
@@ -257,13 +291,14 @@ async fn get_commits_info_by_url(
     client: &Client,
     url: String,
     token: &str,
-    days_duration: Duration,
+    days_duration: ChronoDuration,
+    pb: Option<&ProgressBar>,
 ) -> Result<Vec<Commit>> {
     let mut page = 1;
     let mut filter_author = vec![];
 
     loop {
-        info!("Getting repo: {} page: {}", url, page);
+        update_pb(pb, format!("Getting repo: {} page: {}", url, page));
 
         let json = match get_commits(&client, &token, &url, page).await {
             Ok(json) => json,
@@ -296,5 +331,13 @@ async fn get_commits_info_by_url(
         }
 
         page += 1;
+    }
+}
+
+fn update_pb(pb: Option<&ProgressBar>, msg: String) {
+    if let Some(pb) = pb {
+        pb.set_message(msg);
+    } else {
+        info!("{}", msg);
     }
 }
