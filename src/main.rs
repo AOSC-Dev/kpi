@@ -155,21 +155,17 @@ async fn main() -> Result<()> {
         match i {
             Ok(commits) => {
                 for commit in commits {
-                    if let Some(author) = commit.author {
-                        if let Some(url) = &author.html_url {
-                            if let Some(login) = author.login {
+                    if let Some(author) = commit.author
+                        && let Some(url) = &author.html_url
+                            && let Some(login) = author.login {
                                 map.insert(login.to_string(), url.to_string());
                             }
-                        }
-                    }
 
-                    if let Some(committer) = commit.committer {
-                        if let Some(url) = &committer.html_url {
-                            if let Some(login) = committer.login {
+                    if let Some(committer) = commit.committer
+                        && let Some(url) = &committer.html_url
+                            && let Some(login) = committer.login {
                                 map.insert(login.to_string(), url.to_string());
                             }
-                        }
-                    }
                 }
             }
             Err(e) => {
