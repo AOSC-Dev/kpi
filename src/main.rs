@@ -300,7 +300,7 @@ async fn get_commits_info_by_url(
     loop {
         update_pb(pb, format!("Getting repo: {} page: {}", url, page));
 
-        let json = match get_commits(&client, &token, &url, page).await {
+        let json = match get_commits(client, token, &url, page).await {
             Ok(json) => json,
             Err(e) => match e.status() {
                 Some(StatusCode::CONFLICT) => {
