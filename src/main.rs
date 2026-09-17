@@ -2,13 +2,13 @@ use std::{collections::HashMap, time::Duration};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use clap::Parser;
-use eyre::{bail, Result};
+use eyre::{Result, bail};
 use futures::StreamExt;
 use indicatif::ProgressBar;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use tracing::{debug, error, info, level_filters::LevelFilter};
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Deserialize, Debug)]
 struct Repo {
@@ -157,15 +157,17 @@ async fn main() -> Result<()> {
                 for commit in commits {
                     if let Some(author) = commit.author
                         && let Some(url) = &author.html_url
-                            && let Some(login) = author.login {
-                                map.insert(login.to_string(), url.to_string());
-                            }
+                        && let Some(login) = author.login
+                    {
+                        map.insert(login.to_string(), url.to_string());
+                    }
 
                     if let Some(committer) = commit.committer
                         && let Some(url) = &committer.html_url
-                            && let Some(login) = committer.login {
-                                map.insert(login.to_string(), url.to_string());
-                            }
+                        && let Some(login) = committer.login
+                    {
+                        map.insert(login.to_string(), url.to_string());
+                    }
                 }
             }
             Err(e) => {
